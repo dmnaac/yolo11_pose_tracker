@@ -1,0 +1,31 @@
+# BoT-SORT tracker with ReID enabled, tuned for YOLO11-pose person tracking.
+#
+# Used by pose_test.py via `--tracker`. Pass --no-reid to fall back to the
+# built-in botsort.yaml instead.
+#
+# ReID note: `model: auto` reuses the feature map from the detector's own head
+# rather than loading a separate ReID network. The YOLO11-pose head subclasses
+# Detect, so those native features are available and no extra model download is
+# needed. Set an explicit path (e.g. 'yolo11n-cls.pt') to use an external
+# encoder instead, at the cost of extra compute per frame.
+
+tracker_type: botsort
+
+# --- Detection association ---
+track_high_thresh: 0.25   # first-stage match threshold
+track_low_thresh: 0.1     # second-stage threshold, recovers weak detections
+new_track_thresh: 0.25    # score needed to spawn a new track
+track_buffer: 30          # frames a lost track survives (occlusion tolerance)
+match_thresh: 0.8         # association cost threshold
+fuse_score: True          # blend detection score into the matching cost
+
+# --- Global motion compensation ---
+# Compensates for camera movement, which matters on a handheld/laptop webcam.
+# Without this, a moving camera drifts all tracks together.
+gmc_method: sparseOptFlow
+
+# --- ReID ---
+with_reid: True
+model: auto               # reuse the detector's own features (no download)
+proximity_thresh: 0.5     # min IoU before appearance is even considered
+appearance_thresh: 0.8    # min appearance similarity for a ReID match

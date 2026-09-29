@@ -1,0 +1,61 @@
+# TrackTrack tracker with ReID enabled, tuned for YOLO11-pose person tracking.
+#
+# Used by pose_test.py when present (the default). Pass --tracker to use a
+# different config, or --no-reid for motion-only association.
+#
+# TrackTrack is a multi-cue tracker (CVPR 2025, "Focusing on Tracks for Online
+# Multi-Object Tracking"). Unlike BoT-SORT it blends FOUR cues -- HMIoU,
+# appearance, confidence, and corner angle -- and uses iterative assignment
+# with track-aware initialization.
+#
+# ReID note: `model: auto` reuses the feature map from the detector's own head
+# rather than loading a separate ReID network. The YOLO11-pose head subclasses
+# Detect, so those native features are available with no extra model download.
+# Set an explicit path (e.g. 'yolo11n-cls.pt') to use an external encoder.
+
+tracker_type: tracktrack
+
+# --- Detection thresholds ---
+# TrackTrack's defaults are stricter than BoT-SORT's, which suits the cleaner
+# detections a pose model produces.
+track_high_thresh: 0.6    # high-confidence stage
+track_low_thresh: 0.25    # low-confidence second stage
+new_track_thresh: 0.7     # score needed to start a track (track-aware init)
+track_buffer: 30          # frames a lost track survives (occlusion tolerance)
+match_thresh: 0.7         # initial iterative-assignment threshold
+# Looser rebind gate for still-lost tracks. 0 disables the relaxed second pass.
+# Raise toward 0.9 if you have long occlusions and want to recover identities.
+lost_match_thr: 0.0
+
+# --- Association weights (the four cues) ---
+iou_weight: 0.5           # HMIoU distance
+reid_weight: 0.5          # appearance cosine distance (falls back to HMIoU
+                          # if ReID features are unavailable)
+conf_weight: 0.1          # confidence distance
+angle_weight: 0.05        # corner angle distance
+
+# --- Iterative assignment ---
+penalty_p: 0.2            # cost penalty for low-confidence detections
+penalty_q: 0.4            # cost penalty for deleted/recovered detections
+reduce_step: 0.05         # threshold reduction per iteration
+
+# --- Track-Aware Initialization ---
+tai_thr: 0.55             # IoU threshold for TAI NMS suppression
+min_track_len: 3          # frames of history before a track is confirmed
+
+# --- Camera motion compensation ---
+# Compensates handheld/laptop-webcam movement. Without it all tracks drift
+# together when the camera moves.
+gmc_method: sparseOptFlow
+
+# --- ReID ---
+with_reid: True
+# 'auto' reuses the feature map from the detector's own head, so no separate
+# ReID network is downloaded or run and NO ONNX/onnxruntime is involved.
+# The YOLO11-pose head subclasses Detect, so those features are available.
+#
+# Any other value is treated as a path to an external ReID model and is loaded
+# via AutoBackend. That path REQUIRES the `onnx` and `onnxruntime` packages, and
+# a .onnx file here additionally requires onnxruntime-gpu to match your CUDA
+# major version. Prefer 'auto' unless you have a specific reason not to.
+model: auto
