@@ -15,6 +15,10 @@ inference device (CPU or GPU) is selectable at launch time.
 - Real-time person detection + pose estimation (YOLO11-pose, `yolo11n/s/m/l/x-pose.pt`)
 - Multi-object tracking with persistent IDs (`persist=True`); tracker backend
   selectable: ByteTrack (default), BoT-SORT, or a custom tracker YAML
+- **Target re-identification**: the first frame containing exactly one person
+  locks that person as the target (always published as `track_id 0`). If the
+  tracker loses the target, an OSNet-x0_25 appearance model re-identifies them
+  when they reappear — the search never expires
 - Persons only (COCO class 0) — other object classes are filtered out
 - Structured output message: track ID, bounding box, keypoints with per-point
   confidence, timestamped with the source image header
@@ -72,15 +76,50 @@ Keypoint indices follow the COCO layout:
 | `tracker` | `<pkg_share>/model/botsort_reid.yaml` | ultralytics tracker config (bundled: `botsort_reid.yaml`, `tracktrack_reid.yaml`, or any custom YAML) |
 | `publish_annotated` | `true` | publish the annotated debug image |
 | `keypoint_conf_threshold` | `0.3` | min keypoint confidence for drawing the debug skeleton |
+| `enable_reid` | `true` | lock the first lone person as target (ID 0) and re-identify via OSNet-x0_25 |
+| `reid_model_path` | `~/.cache/torch/checkpoints/osnet_x0_25_market1501.pth` | OSNet-x0_25 weights; falls back to ImageNet-pretrained if missing |
+| `reid_threshold` | `0.75` | cosine similarity threshold to re-acquire the lost target (sample photos: same person ≈1.0, different persons 0.35–0.70) |
+
+## Target re-identification
+
+With `enable_reid:=true` (default) the node runs a small state machine on top
+of the tracker:
+
+```
+WAITING ── exactly 1 person in frame ──► TRACKING ── tracker loses ID ──► LOST
+   ▲                                        │                              │
+   │                                        │  OSNet-x0_25 match >=        │
+   └──────────── never re-locks ────────────┴── reid_threshold ◄───────────┘
+```
+
+- **WAITING**: no target. Locking only happens on a frame with exactly one
+  person (zero or 2+ persons never lock).
+- **TRACKING**: the target is published with `track_id 0`; everyone else keeps
+  their raw tracker ID. No ReID features are computed in this state.
+- **LOST**: every visible person is embedded with OSNet-x0_25 each frame and
+  compared (cosine similarity) to the target's stored feature. A match at or
+  above `reid_threshold` re-acquires the target. The search never expires and
+  a new target is never locked automatically.
+
+The annotated image shows the state banner plus a red `TARGET 0` box for the
+locked person (green boxes for everyone else).
 
 ## Dependencies
 
 - ROS 2 Humble (`rclpy`, `sensor_msgs`, `std_msgs`, `cv_bridge`, `rosidl_default_generators`)
 - Python: `ultralytics` (pulls in PyTorch; install the CUDA build of torch for GPU)
+- Python: `torchreid` + `gdown` + `tensorboard` (target re-identification;
+  OSNet-x0_25 weights download once from the torchreid model zoo)
 
 ```bash
 sudo apt install ros-humble-cv-bridge
 pip install ultralytics          # into the python env used by ROS 2
+pip install torchreid gdown tensorboard
+# Optional but recommended: person-ReID-trained OSNet-x0_25 weights
+# (ImageNet weights are used automatically if this file is missing)
+python3 -c "import gdown; gdown.download( \
+  'https://drive.google.com/uc?id=1rb8UN5ZzPKRc_xvtHlyDh-cSz88YX9hs', \
+  '$HOME/.cache/torch/checkpoints/osnet_x0_25_market1501.pth')"
 ```
 
 ## Build
@@ -114,6 +153,8 @@ ros2 run rqt_image_view rqt_image_view /pose_tracker/annotated_image
 
 ## Notes
 
+- With `enable_reid:=true`, `track_id 0` is reserved for the locked target;
+  all other persons carry their raw tracker IDs (which start at 1).
 - A dummy warm-up pass runs at node startup so the first real frame is not
   slowed by model/graph initialization.
 - Track IDs persist across frames while the node runs (`persist=True`); they

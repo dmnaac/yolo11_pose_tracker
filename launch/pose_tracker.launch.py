@@ -27,12 +27,18 @@ def generate_launch_description():
         DeclareLaunchArgument('conf_threshold', default_value='0.25',
                               description='Detection confidence threshold'),
         DeclareLaunchArgument('tracker',
-                              default_value=os.path.join(model_dir, 'tracktrack_reid.yaml'),
+                              default_value=os.path.join(model_dir, 'botsort_reid.yaml'),
                               description='Ultralytics tracker config (bundled: '
                                           'botsort_reid.yaml / tracktrack_reid.yaml, '
                                           'or any custom yaml path)'),
         DeclareLaunchArgument('publish_annotated', default_value='true',
                               description='Publish annotated debug image'),
+        DeclareLaunchArgument('enable_reid', default_value='true',
+                              description='Lock the first lone person as target '
+                                          '(ID 0) and re-identify via OSNet-x0_25'),
+        DeclareLaunchArgument('reid_threshold', default_value='0.75',
+                              description='Cosine similarity threshold for '
+                                          'target re-identification'),
         Node(
             package='yolo11_pose_tracker',
             executable='pose_tracker_node.py',
@@ -47,6 +53,10 @@ def generate_launch_description():
                 'tracker': LaunchConfiguration('tracker'),
                 'publish_annotated': ParameterValue(
                     LaunchConfiguration('publish_annotated'), value_type=bool),
+                'enable_reid': ParameterValue(
+                    LaunchConfiguration('enable_reid'), value_type=bool),
+                'reid_threshold': ParameterValue(
+                    LaunchConfiguration('reid_threshold'), value_type=float),
             }],
         ),
     ])
