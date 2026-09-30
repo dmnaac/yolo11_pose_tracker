@@ -38,11 +38,23 @@ sensor_msgs/Image                     yolo11_pose_tracker/PersonPoseArray
 
 ## Topics
 
-| Topic | Type | Direction | Description |
+The node subscribes to **1 topic** and publishes **2 topics** (one of them
+optional):
+
+### Subscribed
+
+| Topic | Type | QoS | Description |
 |---|---|---|---|
-| `/camera/image_raw` | `sensor_msgs/Image` | subscribe | input camera stream (name set by `image_topic`) |
-| `/pose_tracker/persons` | `yolo11_pose_tracker/PersonPoseArray` | publish | tracked persons: IDs + bboxes + keypoints |
-| `/pose_tracker/annotated_image` | `sensor_msgs/Image` | publish | debug visualization (if `publish_annotated:=true`) |
+| `/camera/image_raw` | `sensor_msgs/Image` | BEST_EFFORT, KEEP_LAST depth 1 | input camera stream (BGR8). Name set by `image_topic` — node default `/camera/image_raw`, launch default `/camera/camera/color/image_raw` |
+
+### Published
+
+| Topic | Type | QoS | Description |
+|---|---|---|---|
+| `/pose_tracker/persons` | `yolo11_pose_tracker/PersonPoseArray` | RELIABLE (default), depth 10 | tracked persons per frame: `track_id` + bbox + 17 keypoints. With `enable_reid:=true` the locked target always has `track_id 0`; empty array when no one is tracked |
+| `/pose_tracker/annotated_image` | `sensor_msgs/Image` | RELIABLE (default), depth 10 | debug visualization: bboxes, IDs, skeleton overlay, ReID state banner. Only published when `publish_annotated:=true` |
+
+All published messages carry the source image's header (timestamp + frame_id).
 
 ## Messages
 
