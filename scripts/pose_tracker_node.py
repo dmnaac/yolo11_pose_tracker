@@ -15,7 +15,9 @@ Target re-identification (enable_reid, default on):
     re-embedded each frame with OSNet-x0_25 and compared against the target's
     stored feature (cosine similarity). A match >= reid_threshold re-acquires
     the target; the search NEVER expires and no new target is ever locked.
-Other persons are always published with their raw tracker IDs.
+With enable_reid on, /pose_tracker/persons carries ONLY the target (ID 0);
+when the target is not visible an empty array is still published. With
+enable_reid off, all tracked persons are published.
 """
 
 import os
@@ -234,6 +236,8 @@ class PoseTrackerNode(Node):
 
         out = PersonPoseArray()
         out.header = Header(stamp=msg.header.stamp, frame_id=msg.header.frame_id)
+        vis = PersonPoseArray()          # unfiltered, for the debug image
+        vis.header = out.header
 
         boxes = result.boxes
         kpts = result.keypoints
@@ -261,12 +265,16 @@ class PoseTrackerNode(Node):
                     kp.y = float(kxy[i, j, 1])
                     kp.confidence = float(kconf[i, j]) if kconf is not None else 0.0
                     person.keypoints.append(kp)
-                out.persons.append(person)
+                vis.persons.append(person)
+                # With ReID on, only the target (published as ID 0) goes out;
+                # everyone else is dropped. With ReID off, publish all.
+                if not self.enable_reid or is_target:
+                    out.persons.append(person)
 
         self.pose_pub.publish(out)
 
         if self.publish_annotated:
-            annotated = self.draw_annotations(frame, out)
+            annotated = self.draw_annotations(frame, vis)
             img_msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
             img_msg.header = out.header
             self.img_pub.publish(img_msg)

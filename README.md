@@ -51,7 +51,7 @@ optional):
 
 | Topic | Type | QoS | Description |
 |---|---|---|---|
-| `/pose_tracker/persons` | `yolo11_pose_tracker/PersonPoseArray` | RELIABLE (default), depth 10 | tracked persons per frame: `track_id` + bbox + 17 keypoints. With `enable_reid:=true` the locked target always has `track_id 0`; empty array when no one is tracked |
+| `/pose_tracker/persons` | `yolo11_pose_tracker/PersonPoseArray` | RELIABLE (default), depth 10 | with `enable_reid:=true`: **only the locked target** (`track_id` = 0, bbox, 17 keypoints) — an empty array is published whenever the target is not visible. With `enable_reid:=false`: all tracked persons with their raw tracker IDs |
 | `/pose_tracker/annotated_image` | `sensor_msgs/Image` | RELIABLE (default), depth 10 | debug visualization: bboxes, IDs, skeleton overlay, ReID state banner. Only published when `publish_annotated:=true` |
 
 All published messages carry the source image's header (timestamp + frame_id).
@@ -106,8 +106,9 @@ WAITING ── exactly 1 person in frame ──► TRACKING ── tracker loses
 
 - **WAITING**: no target. Locking only happens on a frame with exactly one
   person (zero or 2+ persons never lock).
-- **TRACKING**: the target is published with `track_id 0`; everyone else keeps
-  their raw tracker ID. No ReID features are computed in this state.
+- **TRACKING**: only the target is published, always with `track_id 0`; all
+  other tracked persons are dropped from `/pose_tracker/persons`. No ReID
+  features are computed in this state.
 - **LOST**: every visible person is embedded with OSNet-x0_25 each frame and
   compared (cosine similarity) to the target's stored feature. A match at or
   above `reid_threshold` re-acquires the target. The search never expires and
@@ -165,8 +166,10 @@ ros2 run rqt_image_view rqt_image_view /pose_tracker/annotated_image
 
 ## Notes
 
-- With `enable_reid:=true`, `track_id 0` is reserved for the locked target;
-  all other persons carry their raw tracker IDs (which start at 1).
+- With `enable_reid:=true`, `/pose_tracker/persons` contains at most one
+  person — the locked target with `track_id 0` — and is empty while the
+  target is not visible. The annotated debug image still shows every tracked
+  person (target in red, others in green).
 - A dummy warm-up pass runs at node startup so the first real frame is not
   slowed by model/graph initialization.
 - Track IDs persist across frames while the node runs (`persist=True`); they
