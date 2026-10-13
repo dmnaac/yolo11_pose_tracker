@@ -10,11 +10,18 @@ Target re-identification (enable_reid, default on):
   - WAITING: the first frame that contains EXACTLY ONE person locks that
     person as the target. Frames with zero or 2+ persons never lock.
   - TRACKING: while the tracker keeps the target's track ID, the target is
-    published with track_id 0. No ReID features are computed (zero overhead).
-  - LOST: when the tracker loses the target's ID, every visible person is
-    re-embedded each frame with OSNet-x0_25 and compared against the target's
-    stored feature (cosine similarity). A match >= reid_threshold re-acquires
-    the target; the search NEVER expires and no new target is ever locked.
+    published with track_id 0. Every reid_sample_interval frames a
+    high-quality crop of the target is embedded and appended to a feature
+    GALLERY (capped at reid_gallery_size, oldest evicted), so the target's
+    appearance model keeps up with pose/viewpoint/distance changes.
+  - LOST: when the tracker loses the target's ID, every visible person that
+    passes the quality gate (crop size, detection confidence, keypoint
+    completeness) is embedded with OSNet-x0_25 and compared against the
+    WHOLE gallery (max cosine similarity). A candidate is accepted only if
+    its similarity >= reid_threshold AND beats the runner-up by
+    reid_margin, and it must win reid_confirm_frames consecutive frames
+    before the target is re-acquired. The search NEVER expires and no new
+    target is ever locked.
 With enable_reid on, /pose_tracker/persons carries ONLY the target (ID 0);
 when the target is not visible an empty array is still published. With
 enable_reid off, all tracked persons are published.
@@ -73,6 +80,17 @@ class PoseTrackerNode(Node):
         self.declare_parameter('enable_reid', True)
         self.declare_parameter('reid_model_path', DEFAULT_REID_WEIGHTS)
         self.declare_parameter('reid_threshold', 0.75)   # cosine similarity
+        # Gallery: appearance samples collected while TRACKING.
+        self.declare_parameter('reid_gallery_size', 16)
+        self.declare_parameter('reid_sample_interval', 10)  # frames between samples
+        self.declare_parameter('reid_sample_conf', 0.7)     # min det conf to sample
+        # Re-acquisition decision.
+        self.declare_parameter('reid_confirm_frames', 3)    # consecutive wins needed
+        self.declare_parameter('reid_margin', 0.1)          # best-minus-second sim
+        # Candidate quality gate.
+        self.declare_parameter('reid_min_crop', 48)         # min crop width (px)
+        self.declare_parameter('reid_min_det_conf', 0.5)    # min detection conf
+        self.declare_parameter('reid_min_kp_ratio', 0.5)    # keypoints above kp_conf
 
         image_topic = self.get_parameter('image_topic').value
         model_path = self.get_parameter('model_path').value
@@ -85,6 +103,14 @@ class PoseTrackerNode(Node):
         self.reid_model_path = os.path.expanduser(
             self.get_parameter('reid_model_path').value)
         self.reid_threshold = self.get_parameter('reid_threshold').value
+        self.gallery_size = self.get_parameter('reid_gallery_size').value
+        self.sample_interval = self.get_parameter('reid_sample_interval').value
+        self.sample_conf = self.get_parameter('reid_sample_conf').value
+        self.confirm_frames = self.get_parameter('reid_confirm_frames').value
+        self.reid_margin = self.get_parameter('reid_margin').value
+        self.min_crop = self.get_parameter('reid_min_crop').value
+        self.min_det_conf = self.get_parameter('reid_min_det_conf').value
+        self.min_kp_ratio = self.get_parameter('reid_min_kp_ratio').value
 
         # ---------------- Model ----------------
         self.get_logger().info(
@@ -99,8 +125,11 @@ class PoseTrackerNode(Node):
         # ---------------- Target ReID (OSNet-x0_25) ----------------
         self.reid_extractor = None
         self.target_track_id = None    # raw tracker ID of the locked target
-        self.target_feature = None     # L2-normalized 512-d feature tensor
+        self.target_gallery = []       # list of L2-normalized 512-d tensors
         self.reid_state = STATE_WAITING
+        self.reid_frame_count = 0      # frames seen while TRACKING
+        self.vote_id = None            # LOST-state candidate under observation
+        self.vote_count = 0            # its consecutive winning frames
         if self.enable_reid:
             try:
                 from torchreid.reid.utils import FeatureExtractor
@@ -116,9 +145,10 @@ class PoseTrackerNode(Node):
                     f'({weights or "imagenet-auto"}) on "{self.device}"')
                 self.reid_extractor = FeatureExtractor(
                     model_name='osnet_x0_25', model_path=weights,
+                    image_size=(384, 192),
                     device=self.device, verbose=False)
-                # Warm-up with a dummy 256x128 person crop.
-                warm = np.zeros((256, 128, 3), dtype=np.uint8)
+                # Warm-up with a dummy 384x192 person crop.
+                warm = np.zeros((384, 192, 3), dtype=np.uint8)
                 self._normalize(self.reid_extractor(warm))
             except Exception as e:
                 self.get_logger().error(
@@ -177,15 +207,47 @@ class PoseTrackerNode(Node):
         feats = self._normalize(self.reid_extractor(crops))
         return kept, feats
 
-    def _update_target(self, frame, ids, xyxy):
-        """Advance the WAITING -> TRACKING -> LOST target state machine."""
+    def _candidate_ok(self, xyxy, det_conf, kp_conf_row):
+        """Quality gate for ReID candidates / gallery samples."""
+        x1, y1, x2, y2 = xyxy
+        if (x2 - x1) < self.min_crop or (y2 - y1) < 2 * self.min_crop:
+            return False
+        if det_conf < self.min_det_conf:
+            return False
+        if kp_conf_row is not None:
+            ratio = float(np.mean(kp_conf_row > self.kp_conf))
+            if ratio < self.min_kp_ratio:
+                return False
+        return True
+
+    def _gallery_similarity(self, feats: torch.Tensor) -> torch.Tensor:
+        """Max cosine similarity of each candidate against the gallery."""
+        gallery = torch.stack(self.target_gallery)      # (K, 512)
+        return torch.mm(feats, gallery.t()).max(dim=1).values
+
+    def _gallery_add(self, feat: torch.Tensor):
+        self.target_gallery.append(feat)
+        if len(self.target_gallery) > self.gallery_size:
+            self.target_gallery.pop(0)
+
+    def _reset_votes(self):
+        self.vote_id = None
+        self.vote_count = 0
+
+    def _update_target(self, frame, ids, xyxy, bconf, kconf):
+        """Advance the WAITING -> TRACKING -> LOST target state machine.
+
+        ids: list of tracker IDs; xyxy: (N,4) bboxes; bconf: (N,) detection
+        confidences; kconf: (N,17) keypoint confidences or None.
+        """
         if self.reid_state == STATE_WAITING:
             # Lock only when exactly one person is visible.
             if len(ids) == 1:
                 kept, feats = self._extract_features(frame, xyxy)
                 if feats is not None:
                     self.target_track_id = int(ids[kept[0]])
-                    self.target_feature = feats[0]
+                    self.target_gallery = [feats[0]]
+                    self.reid_frame_count = 0
                     self.reid_state = STATE_TRACKING
                     self.get_logger().info(
                         f'Target locked: tracker ID {self.target_track_id} '
@@ -193,24 +255,72 @@ class PoseTrackerNode(Node):
 
         elif self.reid_state == STATE_TRACKING:
             if self.target_track_id in ids:
-                pass   # tracker still holds the target; zero ReID overhead
+                self.reid_frame_count += 1
+                # Low-frequency gallery enrichment with high-quality crops.
+                idx = ids.index(self.target_track_id)
+                kp_row = kconf[idx] if kconf is not None else None
+                if (self.reid_frame_count % self.sample_interval == 0
+                        and len(self.target_gallery) < self.gallery_size
+                        and bconf[idx] >= self.sample_conf
+                        and self._candidate_ok(xyxy[idx], bconf[idx], kp_row)):
+                    kept, feats = self._extract_features(
+                        frame, xyxy[idx:idx + 1])
+                    if feats is not None:
+                        self._gallery_add(feats[0])
+                        self.get_logger().debug(
+                            f'Gallery size -> {len(self.target_gallery)}')
             else:
                 self.reid_state = STATE_LOST
+                self._reset_votes()
                 self.get_logger().warn(
                     f'Target (tracker ID {self.target_track_id}) lost; '
                     'starting OSNet re-identification search')
 
         if self.reid_state == STATE_LOST:
-            # Search every visible person, every frame, forever.
-            kept, feats = self._extract_features(frame, xyxy)
-            if feats is None:
+            # Quality-gate every visible person before embedding.
+            cand = [i for i in range(len(ids))
+                    if self._candidate_ok(
+                        xyxy[i], bconf[i],
+                        kconf[i] if kconf is not None else None)]
+            if not cand:
+                self._reset_votes()
                 return
-            sims = torch.mv(feats, self.target_feature)   # cosine (normalized)
-            best = int(torch.argmax(sims).item())
+            kept, feats = self._extract_features(frame, xyxy[cand])
+            if feats is None:
+                self._reset_votes()
+                return
+            sims = self._gallery_similarity(feats)        # (M,)
+            order = torch.argsort(sims, descending=True)
+            best = int(order[0].item())
             best_sim = float(sims[best].item())
-            if best_sim >= self.reid_threshold:
-                self.target_track_id = int(ids[kept[best]])
+            second_sim = (float(sims[int(order[1].item())].item())
+                          if sims.numel() > 1 else -1.0)
+            self.get_logger().info(
+                f'ReID search: best similarity {best_sim:.3f} '
+                f'(threshold {self.reid_threshold})',
+                throttle_duration_sec=1.0)
+
+            accepted = (best_sim >= self.reid_threshold
+                        and best_sim - second_sim >= self.reid_margin)
+            if not accepted:
+                self._reset_votes()
+                return
+
+            cand_id = int(ids[cand[kept[best]]])
+            if cand_id == self.vote_id:
+                self.vote_count += 1
+            else:
+                self.vote_id = cand_id
+                self.vote_count = 1
+            self.get_logger().info(
+                f'Candidate tracker ID {cand_id} matched '
+                f'({best_sim:.3f}), vote {self.vote_count}/'
+                f'{self.confirm_frames}')
+            if self.vote_count >= self.confirm_frames:
+                self.target_track_id = cand_id
                 self.reid_state = STATE_TRACKING
+                self.reid_frame_count = 0
+                self._reset_votes()
                 self.get_logger().info(
                     f'Target re-identified: tracker ID {self.target_track_id} '
                     f'(similarity {best_sim:.3f}) -> published as ID 0')
@@ -249,7 +359,7 @@ class PoseTrackerNode(Node):
             kconf = kpts.conf.cpu().numpy() if kpts.conf is not None else None
 
             if self.enable_reid:
-                self._update_target(frame, ids, xyxy)
+                self._update_target(frame, ids, xyxy, bconf, kconf)
 
             for i, track_id in enumerate(ids):
                 track_id = int(track_id)

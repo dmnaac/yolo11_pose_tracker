@@ -36,9 +36,15 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_reid', default_value='true',
                               description='Lock the first lone person as target '
                                           '(ID 0) and re-identify via OSNet-x0_25'),
-        DeclareLaunchArgument('reid_threshold', default_value='0.75',
+        DeclareLaunchArgument('reid_threshold', default_value='0.8',
                               description='Cosine similarity threshold for '
                                           'target re-identification'),
+        DeclareLaunchArgument('reid_confirm_frames', default_value='3',
+                              description='Consecutive matching frames required '
+                                          'to re-acquire the lost target'),
+        DeclareLaunchArgument('reid_margin', default_value='0.1',
+                              description='Best-vs-runner-up similarity gap '
+                                          'required to accept a candidate'),
         Node(
             package='yolo11_pose_tracker',
             executable='pose_tracker_node.py',
@@ -57,6 +63,10 @@ def generate_launch_description():
                     LaunchConfiguration('enable_reid'), value_type=bool),
                 'reid_threshold': ParameterValue(
                     LaunchConfiguration('reid_threshold'), value_type=float),
+                'reid_confirm_frames': ParameterValue(
+                    LaunchConfiguration('reid_confirm_frames'), value_type=int),
+                'reid_margin': ParameterValue(
+                    LaunchConfiguration('reid_margin'), value_type=float),
             }],
         ),
     ])

@@ -90,7 +90,15 @@ Keypoint indices follow the COCO layout:
 | `keypoint_conf_threshold` | `0.3` | min keypoint confidence for drawing the debug skeleton |
 | `enable_reid` | `true` | lock the first lone person as target (ID 0) and re-identify via OSNet-x0_25 |
 | `reid_model_path` | `~/.cache/torch/checkpoints/osnet_x0_25_market1501.pth` | OSNet-x0_25 weights; falls back to ImageNet-pretrained if missing |
-| `reid_threshold` | `0.75` | cosine similarity threshold to re-acquire the lost target (sample photos: same person ≈1.0, different persons 0.35–0.70) |
+| `reid_threshold` | `0.75` | cosine similarity threshold to accept a re-ID candidate |
+| `reid_gallery_size` | `16` | max appearance samples kept for the target (oldest evicted) |
+| `reid_sample_interval` | `10` | TRACKING frames between gallery enrichment samples |
+| `reid_sample_conf` | `0.7` | min detection confidence for a gallery sample |
+| `reid_confirm_frames` | `3` | consecutive matching frames required to re-acquire the target |
+| `reid_margin` | `0.1` | required best-vs-runner-up similarity gap when several candidates match |
+| `reid_min_crop` | `48` | min candidate crop width in px (height must be ≥ 2×) |
+| `reid_min_det_conf` | `0.5` | min detection confidence for re-ID candidates |
+| `reid_min_kp_ratio` | `0.5` | min fraction of keypoints above `keypoint_conf_threshold` (person fully visible) |
 
 ## Target re-identification
 
@@ -105,14 +113,23 @@ WAITING ── exactly 1 person in frame ──► TRACKING ── tracker loses
 ```
 
 - **WAITING**: no target. Locking only happens on a frame with exactly one
-  person (zero or 2+ persons never lock).
+  person (zero or 2+ persons never lock). The lock crop seeds the appearance
+  gallery.
 - **TRACKING**: only the target is published, always with `track_id 0`; all
-  other tracked persons are dropped from `/pose_tracker/persons`. No ReID
-  features are computed in this state.
-- **LOST**: every visible person is embedded with OSNet-x0_25 each frame and
-  compared (cosine similarity) to the target's stored feature. A match at or
-  above `reid_threshold` re-acquires the target. The search never expires and
-  a new target is never locked automatically.
+  other tracked persons are dropped from `/pose_tracker/persons`. Every
+  `reid_sample_interval` frames a high-quality target crop (detection
+  confidence ≥ `reid_sample_conf`, complete keypoints) is embedded and added
+  to the gallery (max `reid_gallery_size` samples), so the appearance model
+  tracks pose / viewpoint / distance changes.
+- **LOST**: every visible person that passes the quality gate (crop size
+  ≥ `reid_min_crop`, detection confidence ≥ `reid_min_det_conf`, keypoint
+  ratio ≥ `reid_min_kp_ratio`) is embedded with OSNet-x0_25 (384×192 input)
+  and compared against the whole gallery (max cosine similarity). A candidate
+  must (a) reach `reid_threshold`, (b) beat the runner-up by `reid_margin`,
+  and (c) win on `reid_confirm_frames` consecutive frames — only then is the
+  target re-acquired. The search never expires and a new target is never
+  locked automatically. While searching, the best similarity is logged once
+  per second to help tune `reid_threshold` on real data.
 
 The annotated image shows the state banner plus a red `TARGET 0` box for the
 locked person (green boxes for everyone else).
